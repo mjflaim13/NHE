@@ -25,6 +25,13 @@ A fully static "big board" visualizing U.S. Medicare drug spending with extrapol
 
 If you need to target a different report year, append `--year 2023` (for example). Use `--outdir` to emit JSON to a different folder.
 
+## Loading JSON from the browser
+
+Prefer to manage data without touching the filesystem? Open `index.html` and use the **Upload data** button in the header to
+select the `medicare_drugs_YYYY.json` files (and optional `nhe_retail_rx.json`). The app validates the payloads and stashes them
+in your browser via IndexedDB so the scoreboard lights up automatically on future visits. Use **Clear saved data** to forget
+those files or switch to a different dataset.
+
 ## Scope & methodology
 - Covers **Medicare Part D (retail prescription)** and **Medicare Part B (physician-administered drugs)** only.
 - "Live" counters are honest extrapolations: the latest full-year totals are pro-rated by the elapsed seconds in the selected calendar year (if the year has already ended, totals stay fixed).

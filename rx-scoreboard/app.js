@@ -5,6 +5,147 @@
   const NHE_PATH = 'data/nhe_retail_rx.json';
   const svgNS = 'http://www.w3.org/2000/svg';
 
+  const storage = createStorage();
+
+  function createStorage() {
+    const DB_NAME = 'rx-scoreboard-data';
+    const STORE_NAME = 'files';
+    let dbPromise = null;
+
+    const isSupported = () => typeof indexedDB !== 'undefined';
+
+    async function openDb() {
+      if (!isSupported()) {
+        return null;
+      }
+      if (dbPromise) {
+        return dbPromise;
+      }
+      dbPromise = new Promise((resolve, reject) => {
+        try {
+          const request = indexedDB.open(DB_NAME, 1);
+          request.onupgradeneeded = () => {
+            const db = request.result;
+            if (!db.objectStoreNames.contains(STORE_NAME)) {
+              db.createObjectStore(STORE_NAME, { keyPath: 'name' });
+            }
+          };
+          request.onsuccess = () => {
+            const db = request.result;
+            db.onversionchange = () => {
+              db.close();
+            };
+            resolve(db);
+          };
+          request.onerror = () => {
+            reject(request.error || new Error('Failed to open storage'));
+          };
+        } catch (error) {
+          reject(error);
+        }
+      }).catch((error) => {
+        console.error('Storage unavailable', error);
+        return null;
+      });
+      return dbPromise;
+    }
+
+    async function save(name, contents, type = 'application/json') {
+      const db = await openDb();
+      if (!db) {
+        return false;
+      }
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readwrite');
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+        const store = tx.objectStore(STORE_NAME);
+        store.put({ name, contents, type, updated: Date.now() });
+      }).catch((error) => {
+        console.error('Failed to save data', error);
+        return false;
+      });
+    }
+
+    async function load(name) {
+      const db = await openDb();
+      if (!db) {
+        return null;
+      }
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readonly');
+        const store = tx.objectStore(STORE_NAME);
+        const request = store.get(name);
+        request.onsuccess = () => resolve(request.result || null);
+        request.onerror = () => reject(request.error);
+      }).catch((error) => {
+        console.error('Failed to read data', error);
+        return null;
+      });
+    }
+
+    async function list() {
+      const db = await openDb();
+      if (!db) {
+        return [];
+      }
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readonly');
+        const store = tx.objectStore(STORE_NAME);
+        const request = store.getAll();
+        request.onsuccess = () => resolve(request.result || []);
+        request.onerror = () => reject(request.error);
+      }).catch((error) => {
+        console.error('Failed to list stored data', error);
+        return [];
+      });
+    }
+
+    async function remove(name) {
+      const db = await openDb();
+      if (!db) {
+        return false;
+      }
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readwrite');
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+        tx.objectStore(STORE_NAME).delete(name);
+      }).catch((error) => {
+        console.error('Failed to delete stored data', error);
+        return false;
+      });
+    }
+
+    async function clearAll() {
+      const db = await openDb();
+      if (!db) {
+        return false;
+      }
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readwrite');
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+        tx.objectStore(STORE_NAME).clear();
+      }).catch((error) => {
+        console.error('Failed to clear stored data', error);
+        return false;
+      });
+    }
+
+    return {
+      isSupported,
+      save,
+      load,
+      list,
+      remove,
+      clear: clearAll,
+    };
+  }
+
   const USD_FULL = new Intl.NumberFormat('en-US', {
     style: 'currency',
     currency: 'USD',
@@ -34,12 +175,19 @@
     part: 'both',
     glp1Only: false,
     nhe: null,
+    dataSources: new Map(),
+    nheSource: null,
   };
 
   const elements = {
     yearSelect: document.getElementById('yearSelect'),
     partToggle: document.getElementById('partToggle'),
     glp1: document.getElementById('glp1Only'),
+    dataManager: document.getElementById('dataManager'),
+    dataStatus: document.getElementById('dataStatus'),
+    uploadButton: document.getElementById('uploadDataButton'),
+    clearDataButton: document.getElementById('clearDataButton'),
+    dataFileInput: document.getElementById('dataFileInput'),
     heroSection: document.getElementById('hero'),
     heroTotal: document.getElementById('heroTotal'),
     heroRate: document.getElementById('heroRate'),
@@ -53,6 +201,8 @@
   };
 
   const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  let filtersBound = false;
+  let dataControlsBound = false;
   let tooltipBubble = null;
   let rafId = null;
   let lastFrame = null;
@@ -203,18 +353,16 @@
   document.addEventListener('DOMContentLoaded', init);
 
   async function init() {
-    const discoveredYears = await discoverYears();
-    if (discoveredYears.length === 0) {
-      showEmptyState(true);
-      await loadNhe();
-      return;
-    }
-    state.years = discoveredYears;
-    state.year = discoveredYears[0];
-    populateYearSelect();
     bindControls();
+    bindDataControls();
+    await hydrateFromStorage();
+    updateDataStatus();
+    const hasData = await refreshData({ fetchMissing: true, runUpdate: false });
     await loadNhe();
-    update();
+    if (hasData) {
+      update();
+    }
+    updateDataStatus();
   }
 
   function showEmptyState(show) {
@@ -232,10 +380,19 @@
       option.textContent = String(year);
       select.appendChild(option);
     });
-    select.value = String(state.year);
+    if (state.year != null) {
+      select.value = String(state.year);
+    } else {
+      select.value = '';
+    }
+    select.disabled = state.years.length === 0;
   }
 
   function bindControls() {
+    if (filtersBound) {
+      return;
+    }
+    filtersBound = true;
     elements.yearSelect.addEventListener('change', (event) => {
       const value = Number.parseInt(event.target.value, 10);
       if (!Number.isNaN(value)) {
@@ -255,10 +412,294 @@
     });
   }
 
+  function bindDataControls() {
+    if (dataControlsBound) {
+      return;
+    }
+    dataControlsBound = true;
+    const { uploadButton, dataFileInput, clearDataButton } = elements;
+    if (uploadButton && dataFileInput) {
+      uploadButton.addEventListener('click', () => {
+        dataFileInput.click();
+      });
+      dataFileInput.addEventListener('change', async (event) => {
+        const { files } = event.target;
+        if (files && files.length > 0) {
+          await handleDataUpload(files);
+        }
+        dataFileInput.value = '';
+      });
+    }
+    if (clearDataButton) {
+      clearDataButton.addEventListener('click', async () => {
+        const hasStored = getStoredMedicareYears().length > 0 || state.nheSource === 'storage';
+        const hasSessionUploads = [...state.dataSources.values()].some((value) => value === 'session')
+          || state.nheSource === 'session';
+        if (!hasStored && !hasSessionUploads && !state.nhe) {
+          updateDataStatus('No saved data to clear.');
+          return;
+        }
+        if (hasStored || hasSessionUploads) {
+          const confirmed = window.confirm('Remove locally saved data from this browser?');
+          if (!confirmed) {
+            return;
+          }
+        }
+        await forgetStoredData();
+      });
+    }
+  }
+
+  async function hydrateFromStorage() {
+    if (!storage.isSupported()) {
+      return;
+    }
+    try {
+      const records = await storage.list();
+      records.forEach((record) => {
+        if (!record || typeof record.name !== 'string') {
+          return;
+        }
+        if (record.name.startsWith('medicare_drugs_')) {
+          const match = record.name.match(/medicare_drugs_(\d{4})\.json$/i);
+          if (!match) {
+            return;
+          }
+          const year = Number.parseInt(match[1], 10);
+          try {
+            const payload = typeof record.contents === 'string' ? JSON.parse(record.contents) : record.contents;
+            if (Array.isArray(payload)) {
+              state.dataByYear.set(year, payload);
+              state.dataSources.set(year, 'storage');
+            } else {
+              storage.remove(record.name);
+            }
+          } catch (error) {
+            console.error('Failed to parse stored Medicare data', error);
+            storage.remove(record.name);
+          }
+        } else if (record.name === 'nhe_retail_rx.json') {
+          try {
+            const payload = typeof record.contents === 'string' ? JSON.parse(record.contents) : record.contents;
+            if (payload && typeof payload === 'object') {
+              state.nhe = payload;
+              state.nheSource = 'storage';
+            } else {
+              storage.remove(record.name);
+            }
+          } catch (error) {
+            console.error('Failed to parse stored NHE data', error);
+            storage.remove(record.name);
+          }
+        }
+      });
+    } catch (error) {
+      console.error('Unable to hydrate stored data', error);
+    }
+  }
+
+  async function refreshData({ fetchMissing = true, runUpdate = true } = {}) {
+    let years;
+    if (fetchMissing) {
+      years = await discoverYears();
+    } else {
+      years = [...state.dataByYear.keys()].sort((a, b) => b - a);
+    }
+    state.years = years;
+    if (!state.years.length) {
+      state.year = null;
+      populateYearSelect();
+      showEmptyState(true);
+      return false;
+    }
+    if (state.year == null || !state.years.includes(state.year)) {
+      state.year = state.years[0];
+    }
+    populateYearSelect();
+    showEmptyState(false);
+    if (runUpdate) {
+      update();
+    }
+    return true;
+  }
+
+  async function handleDataUpload(fileList) {
+    const files = Array.from(fileList || []);
+    if (!files.length) {
+      updateDataStatus('No files selected.');
+      return;
+    }
+    const savedPersistent = [];
+    const savedSession = [];
+    const skipped = [];
+    const failed = [];
+    for (const file of files) {
+      const canonicalName = normalizeDataFileName(file.name);
+      if (!canonicalName) {
+        skipped.push(file.name);
+        continue;
+      }
+      let text;
+      try {
+        text = await file.text();
+      } catch (error) {
+        console.error('Failed to read uploaded file', file.name, error);
+        failed.push(file.name);
+        continue;
+      }
+      try {
+        const parsed = JSON.parse(text);
+        if (canonicalName.startsWith('medicare_drugs_')) {
+          if (!Array.isArray(parsed)) {
+            throw new Error('Expected an array of Medicare rows.');
+          }
+          const match = canonicalName.match(/medicare_drugs_(\d{4})\.json$/);
+          if (!match) {
+            throw new Error('Unable to determine year from filename.');
+          }
+          const year = Number.parseInt(match[1], 10);
+          state.dataByYear.set(year, parsed);
+          state.dataSources.set(year, 'session');
+          let persisted = false;
+          if (storage.isSupported()) {
+            persisted = await storage.save(canonicalName, text, file.type || 'application/json');
+            if (persisted) {
+              state.dataSources.set(year, 'storage');
+            }
+          }
+          if (persisted) {
+            savedPersistent.push(`Medicare ${year}`);
+          } else {
+            savedSession.push(`Medicare ${year}`);
+          }
+        } else if (canonicalName === 'nhe_retail_rx.json') {
+          if (!parsed || typeof parsed !== 'object') {
+            throw new Error('Expected an object payload for NHE.');
+          }
+          state.nhe = parsed;
+          state.nheSource = 'session';
+          let persisted = false;
+          if (storage.isSupported()) {
+            persisted = await storage.save(canonicalName, text, file.type || 'application/json');
+            if (persisted) {
+              state.nheSource = 'storage';
+            }
+          }
+          if (persisted) {
+            savedPersistent.push('NHE Table 01');
+          } else {
+            savedSession.push('NHE Table 01');
+          }
+        }
+      } catch (error) {
+        console.error('Failed to process uploaded file', file.name, error);
+        failed.push(file.name);
+      }
+    }
+    const hasData = await refreshData({ fetchMissing: false, runUpdate: false });
+    if (hasData) {
+      update();
+    }
+    const messages = [];
+    if (savedPersistent.length) {
+      messages.push(`Saved ${savedPersistent.join(', ')}.`);
+    }
+    if (savedSession.length) {
+      messages.push(`Loaded for this session: ${savedSession.join(', ')}.`);
+    }
+    if (skipped.length) {
+      messages.push(`Skipped unrecognized files: ${skipped.join(', ')}.`);
+    }
+    if (failed.length) {
+      messages.push(`Failed to import: ${failed.join(', ')}.`);
+    }
+    if (!messages.length) {
+      messages.push('No recognized files were uploaded.');
+    }
+    updateDataStatus(messages.join(' '));
+  }
+
+  async function forgetStoredData() {
+    const hadStored = getStoredMedicareYears().length > 0 || state.nheSource === 'storage';
+    const hadSession = [...state.dataSources.values()].some((value) => value === 'session')
+      || state.nheSource === 'session';
+    if (storage.isSupported()) {
+      await storage.clear();
+    }
+    [...state.dataSources.entries()].forEach(([year, source]) => {
+      if (source === 'storage' || source === 'session') {
+        state.dataSources.delete(year);
+        state.dataByYear.delete(year);
+      }
+    });
+    if (state.nheSource === 'storage' || state.nheSource === 'session') {
+      state.nhe = null;
+      state.nheSource = null;
+    }
+    const hasData = await refreshData({ fetchMissing: true, runUpdate: false });
+    await loadNhe();
+    if (hasData) {
+      update();
+    }
+    const message = hadStored || hadSession ? 'Saved data cleared.' : 'No saved data to clear.';
+    updateDataStatus(message);
+  }
+
+  function updateDataStatus(feedback = '') {
+    const statusEl = elements.dataStatus;
+    if (!statusEl) {
+      return;
+    }
+    let summary;
+    if (!storage.isSupported()) {
+      summary = 'This browser cannot store files locally; uploaded data will only persist for this session.';
+    } else {
+      const storedYears = getStoredMedicareYears();
+      const parts = [];
+      if (storedYears.length) {
+        parts.push(`Medicare: ${storedYears.join(', ')}`);
+      }
+      if (state.nheSource === 'storage' && state.nhe) {
+        const yearLabel = state.nhe.latest_year != null ? ` ${state.nhe.latest_year}` : '';
+        parts.push(`NHE${yearLabel}`.trim());
+      }
+      summary = parts.length ? `Saved locally — ${parts.join('; ')}.` : 'No data saved locally yet.';
+    }
+    const text = feedback ? `${feedback.trim()} ${summary}`.trim() : summary;
+    statusEl.textContent = text;
+  }
+
+  function getStoredMedicareYears() {
+    return [...state.dataSources.entries()]
+      .filter(([, source]) => source === 'storage')
+      .map(([year]) => year)
+      .sort((a, b) => b - a)
+      .map((year) => String(year));
+  }
+
+  function normalizeDataFileName(name) {
+    if (!name) {
+      return null;
+    }
+    const sanitized = name.trim().toLowerCase().replace(/\s+/g, '_').replace(/\(\d+\)/g, '');
+    const medicareMatch = sanitized.match(/medicare[_-]?drugs[_-]?(\d{4})\.json$/);
+    if (medicareMatch) {
+      return `medicare_drugs_${medicareMatch[1]}.json`;
+    }
+    if (sanitized === 'nhe_retail_rx.json') {
+      return 'nhe_retail_rx.json';
+    }
+    return null;
+  }
+
   async function discoverYears() {
-    const years = [];
+    const years = new Set([...state.dataByYear.keys()]);
     const currentYear = new Date().getFullYear();
     for (let year = currentYear; year >= YEAR_MIN; year -= 1) {
+      if (state.dataByYear.has(year)) {
+        years.add(year);
+        continue;
+      }
       const url = `${DATA_PREFIX}${year}.json`;
       try {
         const response = await fetch(url, { cache: 'no-cache' });
@@ -268,17 +709,20 @@
         const data = await response.json();
         if (Array.isArray(data)) {
           state.dataByYear.set(year, data);
-          years.push(year);
+          state.dataSources.set(year, 'fetch');
+          years.add(year);
         }
       } catch (error) {
         // ignore network errors for discovery
       }
     }
-    years.sort((a, b) => b - a);
-    return years;
+    return Array.from(years).sort((a, b) => b - a);
   }
 
   async function loadNhe() {
+    if (state.nhe) {
+      return;
+    }
     try {
       const response = await fetch(NHE_PATH, { cache: 'no-cache' });
       if (!response.ok) {
@@ -287,6 +731,7 @@
       const payload = await response.json();
       if (payload && typeof payload === 'object') {
         state.nhe = payload;
+        state.nheSource = 'fetch';
       }
     } catch (error) {
       // swallow fetch errors so UI can still render
@@ -294,6 +739,10 @@
   }
 
   function update() {
+    if (state.year == null) {
+      showEmptyState(true);
+      return;
+    }
     const yearData = state.dataByYear.get(state.year) || [];
     if (!yearData.length) {
       showEmptyState(true);
