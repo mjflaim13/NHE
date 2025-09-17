@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RX Scoreboard</title>
+    <link rel="stylesheet" href="style.css" />
+    <meta name="description" content="Live-style Medicare drug spending scoreboard, extrapolated from CMS data." />
+    <script defer src="app.js"></script>
+  </head>
+  <body>
+    <noscript>
+      <div class="noscript" role="status">
+        This experience needs JavaScript enabled to animate the live Medicare drug spending counters.
+      </div>
+    </noscript>
+    <div id="app" class="app-shell">
+      <header class="site-header" role="banner">
+        <div class="brand">
+          <h1>RX Scoreboard</h1>
+          <p class="subtitle">Real-time style look at Medicare drug spending</p>
+        </div>
+        <form class="controls" aria-label="Scoreboard filters">
+          <label class="control">
+            <span class="control-label">Year</span>
+            <select id="yearSelect" name="year" aria-label="Select data year"></select>
+          </label>
+          <fieldset class="control" role="radiogroup" aria-label="Medicare part">
+            <span class="control-label">Part</span>
+            <div class="segmented" id="partToggle">
+              <label>
+                <input type="radio" name="part" value="both" checked />
+                <span>Both</span>
+              </label>
+              <label>
+                <input type="radio" name="part" value="D" />
+                <span>Part D</span>
+              </label>
+              <label>
+                <input type="radio" name="part" value="B" />
+                <span>Part B</span>
+              </label>
+            </div>
+          </fieldset>
+          <label class="control toggle">
+            <input type="checkbox" id="glp1Only" />
+            <span class="control-label">Highlight GLP-1 &amp; incretin drugs</span>
+          </label>
+        </form>
+      </header>
+
+      <main class="layout" aria-live="off">
+        <section class="empty-state card" id="emptyState" role="status" hidden>
+          <h2>No data yet</h2>
+          <p>
+            Drop your CMS Medicare Part D &amp; Part B drug spending workbooks and the NHE Table 01 workbook into the
+            <code>etl/</code> script to generate JSON files. Run:
+          </p>
+          <pre class="code-block"><code>python etl/prep.py --partd "/path/to/partd.xlsx" --partb "/path/to/partb.xlsx" --nhe "/path/to/nhe_table01.xlsx"</code></pre>
+          <p>Place the emitted JSON in <code>data/</code> and refresh to light up the board.</p>
+        </section>
+
+        <section class="hero-grid" id="hero" aria-labelledby="heroTitle">
+          <article class="card hero-total">
+            <header class="card-header">
+              <h2 id="heroTitle">Estimated YTD Medicare drug spend</h2>
+            </header>
+            <div class="card-body">
+              <p class="stat-xl" id="heroTotal" data-counter>—</p>
+              <div class="hero-meta">
+                <span id="heroRate" class="hero-rate">—</span>
+                <span id="heroContext" class="hero-context"></span>
+                <span class="info-badge" tabindex="0" role="note" aria-describedby="heroTip" data-tooltip>
+                  <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16">
+                    <circle cx="8" cy="8" r="8" />
+                    <text x="8" y="11" text-anchor="middle" font-size="10" font-family="inherit" fill="currentColor">i</text>
+                  </svg>
+                </span>
+                <span class="tooltip" id="heroTip" role="tooltip">
+                  Counters prorate the latest full-year totals across the seconds in the selected calendar year. Past years stay fixed.
+                </span>
+              </div>
+            </div>
+          </article>
+          <article class="card top-drugs" aria-labelledby="topDrugsTitle">
+            <header class="card-header">
+              <h2 id="topDrugsTitle">Top 5 drugs by spend</h2>
+            </header>
+            <div class="card-body">
+              <ol id="topDrugsList" class="top-list" aria-live="polite"></ol>
+            </div>
+          </article>
+        </section>
+
+        <section class="panels">
+          <article class="card" aria-labelledby="moversTitle">
+            <header class="card-header">
+              <h2 id="moversTitle">Big movers vs. prior year</h2>
+            </header>
+            <div class="card-body">
+              <ol id="moversList" class="movers-list"></ol>
+            </div>
+          </article>
+          <article class="card" aria-labelledby="scatterTitle">
+            <header class="card-header">
+              <h2 id="scatterTitle">Unit cost vs. volume</h2>
+            </header>
+            <div class="card-body">
+              <svg id="scatterPlot" viewBox="0 0 640 420" role="img" aria-labelledby="scatterTitle scatterDesc"></svg>
+              <p id="scatterDesc" class="visually-hidden">
+                Bubble chart comparing total Medicare drug spending per claim to total claim counts for the selected scope.
+              </p>
+            </div>
+          </article>
+        </section>
+      </main>
+
+      <footer class="site-footer">
+        <div class="methods">
+          <h2>Methods &amp; scope</h2>
+          <p>
+            Medicare Part D (retail rx) + Part B (physician-admin) only; “live” counters are clean extrapolations from latest full-year totals; NHE retail rx used for contextual headline only.
+          </p>
+          <p class="footnote">
+            Data dictionary references: <a href="https://www.cms.gov/files/document/medicare-part-d-drug-data-dictionary.pdf" id="partdDict" rel="external noopener">CMS Part D dictionary</a>,
+            <a href="https://www.cms.gov/files/document/medicare-part-b-drug-data-dictionary.pdf" id="partbDict" rel="external noopener">CMS Part B dictionary</a>. NHE Table 01 local path supplied by you.
+          </p>
+        </div>
+      </footer>
+    </div>
+    <div id="tooltip" class="tooltip-layer" role="presentation" hidden></div>
+  </body>
+</html>
